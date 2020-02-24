@@ -1,0 +1,209 @@
+---
+title: "New York City Flight Data Analysis"
+author: "Slavvy Coelho (301359836)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+R.version
+#R version 3.6.1 (2019-07-05)
+#Approx time required to knit: 2.45 mins
+```
+
+## Including libraries
+```{r}
+library(tidyverse)
+library(lubridate)
+library(glmnet)
+library(gam)
+library(magrittr)
+library(gbm)
+library(ISLR)
+```
+
+## Loading files
+```{r}
+fltrain <- read_csv("/Users/slavvy/Desktop/MS/STAT/Project /Brad/fltrain.csv")
+fltrain     #(20000,43)
+fltest <-read_csv("/Users/slavvy/Desktop/MS/STAT/Project /Brad/fltest.csv")
+fltest
+
+```
+
+## Data Preprocessing - Training data
+```{r}
+#1. convert to factor
+fl <- fltrain
+for(i in 1:ncol(fl)) {
+  if(typeof(fl[[i]]) == "character") {
+    fl[[i]] <- factor(fl[[i]])
+  }
+}
+
+#2. handling missing values
+num_miss <- function(x) { sum(is.na(x)) }
+sapply(fl,num_miss)
+
+#discard few columns altogether
+fl <- fl%>% 
+  select(-year.y,-type,-manufacturer,-model,-engines,-seats, -speed, 
+         -engine,-wind_gust,-pressure)
+summary(fl)       #dep_delay- Max: 1301 (long tail)
+
+#omit the rows with null values 
+fl <- na.omit(fl)
+
+#3. scale the data (dep_delay)
+den <- nrow(fl)+1
+fl <- fl %>% mutate(dep_delay = rank(dep_delay)/den)
+ggplot(fl,aes(x=dep_delay)) + geom_histogram(binwidth=.01)
+
+#4. eliminate a few more columns
+fl <- fl %>% 
+  mutate(dep_date = make_date(year.x,month,day)) %>% 
+  select(-year.x,-month,-day,-dep_time,-arr_time,-arr_delay,
+         -sched_arr_time,-tailnum,-flight,-name,-air_time,
+         -hour,-minute,-time_hour,-tz,-dst,-tzone) %>%
+  mutate(precip = as.numeric(precip>0))
+fl <- mutate(fl,logdistance = log(distance)) %>% select(-distance)
+fl <- mutate(fl,logalt = log(alt)) %>% select(-alt)
+```
+
+## Data Preprocessing - Test set
+```{r}
+#1. convert to factor
+ft <- fltest
+for(i in 1:ncol(fl)) {
+  if(typeof(ft[[i]]) == "character") {
+    ft[[i]] <- factor(ft[[i]])
+  }
+}
+
+#2. handling missing values
+num_miss <- function(x) { sum(is.na(x)) }
+sapply(ft,num_miss)
+
+#discard few columns altogether
+ft <- ft%>% 
+  select(-year.y,-type,-manufacturer,-model,-engines,-seats, -speed, -engine,-wind_gust,-pressure)
+summary(ft)       #dep_delay- Max: 1301 (long tail)
+
+#omit the rows with null values 
+ft <- na.omit(ft)
+summary(ft)
+
+#3. scale the data (dep_delay)
+den <- nrow(ft)+1
+ft <- ft %>% mutate(dep_delay = rank(dep_delay)/den)
+
+#4. eliminate a few more columns
+ft <- ft %>% 
+  mutate(dep_date = make_date(year.x,month,day)) %>% 
+  select(-year.x,-month,-day,-dep_time,-arr_time,-arr_delay,
+         -sched_arr_time,-tailnum,-flight,-name,-air_time,
+         -hour,-minute,-time_hour,-tz,-dst,-tzone) %>%
+  mutate(precip = as.numeric(precip>0))
+ft <- mutate(ft,logdistance = log(distance)) %>% select(-distance)
+ft <- mutate(ft,logalt = log(alt)) %>% select(-alt)
+```
+
+## 6. Split training set in two for tuning
+```{r}
+set.seed(123)
+tr_size <- ceiling(2*nrow(fl)/3)
+train <- sample(1:nrow(fl),size=tr_size)
+fl_tr <- fl
+fl_te <- ft
+
+# baseline to compare learning methods to:
+var_dd <- var(fl_te$dep_delay)
+var_dd
+```
+
+##7. Fitting models Regression
+```{r}
+##1) GAM Model
+form <- formula(dep_delay ~ s(dep_date) + s(sched_dep_time) + 
+                  carrier + origin + s(logdistance) +
+                  s(temp) + s(dewp) + s(humid) + s(wind_dir) + 
+                  s(wind_speed) + precip + s(visib))
+gam_fit <- gam(form, data=fl_tr,family=gaussian) 
+plot(gam_fit,se=TRUE)
+gam_pred <- predict(gam_fit,newdata=fl_te)
+mse_gam <- mean((fl_te$dep_delay-gam_pred)^2)  #0.07038026
+abs(mse_gam - var_dd)/var_dd    #0.1534388
+rmse <- function(error)
+{
+  sqrt(mean(error^2))
+}
+gam_error <- gam_fit$residuals 
+gam_predictionRMSE <- rmse(gam_error)   # 0.2654785
+```
+
+```{r}
+##2) Boosting
+
+dep_date_numeric <- as.numeric(fl_tr$dep_date)
+dep_date_numeric <- dep_date_numeric - mean(dep_date_numeric)
+fl_tr_tem <- mutate(fl_tr,dep_date = dep_date_numeric)
+gbm_fit <-gbm(dep_delay ~ .,data=fl_tr_tem,distribution="gaussian",
+              n.trees = 1000, shrinkage = 0.01)
+summary(gbm_fit)
+dep_date_numeric <- as.numeric(fl_te$dep_date)
+dep_date_numeric <- dep_date_numeric - mean(dep_date_numeric)
+fl_te_tem <- mutate(fl_te,dep_date = dep_date_numeric)
+gbm_pred <- predict(gbm_fit,newdata=fl_te_tem,n.trees = 1000)
+mse_gbm <- mean((fl_te$dep_delay-gbm_pred)^2)  #0.07181148
+abs(mse_gbm - var_dd)/var_dd   #0.1362235
+gbm_predictionRMSE <- mse_gbm^0.5   # 0.2679766
+```
+
+```{r}
+##3) Logistic regression
+
+glm_fit <- glm(dep_delay ~., data=fl_tr, family=binomial())
+glm_pred <- predict(glm_fit, type="response") 
+mse_glm <- mean((fl_te$dep_delay-glm_pred)^2)
+mse_glm       #0.09359074
+abs(mse_glm - var_dd)/var_dd    #0.1257459
+glm_error <- glm_fit$residuals  # same as data$Y - predictedY
+glm_predictionRMSE <- mse_glm^0.5   # 0.305926
+```
+
+```{r}
+##4) Ridge
+set.seed(1)
+grid=10^seq(10,-2,length=100)
+x_train <- model.matrix(dep_delay ~ ., data = fl_tr)[,-1] 
+x_test <- model.matrix(dep_delay ~ ., data = fl_te)[,-1] 
+y_train<-fl_tr$dep_delay
+cv.ridge <- cv.glmnet(x_train, y_train, alpha = 0)
+plot(cv.ridge)
+bestlam=cv.ridge$lambda.min 
+bestlam      #0.006656471
+fit.ridge <- glmnet(x_train, y_train, alpha = 0, lambda = grid, thresh = 1e-12) 
+pred.ridge <- predict(fit.ridge, s = bestlam, newx = x_test)
+mse_ridge = mean((pred.ridge - fl_te$dep_delay)^2)    #0.07235192
+abs(mse_ridge - var_dd)/var_dd       #0.1297229
+ridge_predictionRMSE <- (mse_ridge)^0.5   #0.2689831
+```
+
+```{r}
+##5) Lasso
+set.seed(23)
+grid=10^seq(10,-2,length=100)
+xmat <- model.matrix(dep_delay ~ ., data=fl_tr)[, -1]
+cv.lasso <- cv.glmnet(xmat, fl_tr$dep_delay, alpha = 1) 
+plot(cv.lasso)
+bestlam <- cv.lasso$lambda.min 
+bestlam     #1.687658e-05
+fit.lasso <- glmnet(xmat, fl_tr$dep_delay, alpha = 1,lambda = bestlam) 
+pred_lasso <- predict(fit.lasso, s = bestlam, newx = x_test)
+mse_lasso = mean((pred_lasso - fl_te$dep_delay)^2)   # 0.07233221
+abs(mse_lasso - var_dd)/var_dd      #0.1299601
+lasso_predictionRMSE <- (mse_lasso)^0.5     #0.2689465
+```
+
