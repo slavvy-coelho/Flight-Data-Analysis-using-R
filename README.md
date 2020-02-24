@@ -4,7 +4,7 @@ This project aims to build a prediction model for predicting flight delays for t
 In this project, various statistical learning frameworks for both classification and regression were explored to build efficient prediction models. The models were explored and improved by standard statistical tests and tuning and the results were compared to in turn select the best one for prediction on the held-out test set.
 
 
-##DATA
+## DATA
 The data is taken from the ‘nycflights13’ package in R. The folder 'DATA' consists of a csv file named fltrain.csv which was combined using the following 4 datasets from this package:
 § Flights: all flights that departed from NYC in 2013 (schedule and logistical modifications)
 § Weather: hourly meteorological data for each airport
